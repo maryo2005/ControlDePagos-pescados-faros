@@ -60,24 +60,37 @@ export function renderConfig(container) {
     </div>
   `;
 
-  // --- Event: Update faro config (debounced) ---
+  // --- Event: Update faro config (debounced + blur) ---
   let configTimers = {};
   container.querySelectorAll('.config-input').forEach(input => {
+    const saveField = async (faroId, field, value) => {
+      const success = await store.updateFaro(faroId, { [field]: value });
+      if (success) {
+        // Update local cache
+        const faro = store.faros.find(f => f.id === faroId);
+        if (faro) faro[field] = value;
+        showToast('Guardado ✓');
+      }
+    };
+
     input.addEventListener('input', (e) => {
       const { faroId, field } = e.target.dataset;
       const value = e.target.value;
       const key = `${faroId}-${field}`;
 
       clearTimeout(configTimers[key]);
-      configTimers[key] = setTimeout(async () => {
-        const success = await store.updateFaro(faroId, { [field]: value });
-        if (success) {
-          // Update local cache
-          const faro = store.faros.find(f => f.id === faroId);
-          if (faro) faro[field] = value;
-          showToast('Guardado ✓');
-        }
+      configTimers[key] = setTimeout(() => {
+        saveField(faroId, field, value);
       }, 600);
+    });
+
+    input.addEventListener('blur', (e) => {
+      const { faroId, field } = e.target.dataset;
+      const value = e.target.value;
+      const key = `${faroId}-${field}`;
+
+      clearTimeout(configTimers[key]);
+      saveField(faroId, field, value);
     });
   });
 }

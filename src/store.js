@@ -119,6 +119,7 @@ export const store = {
         pedido_kg: 0,
         despacho_kg: 0,
         precio_kg: 0,
+        peso_real_kg: 0,
         [field]: numValue
       };
       const { data, error } = await supabase
@@ -132,33 +133,50 @@ export const store = {
     return true;
   },
 
-  // Sincronizar precio: cuando cambia en un faro, actualizar en todos
+  // Sincronizar precio: cuando cambia el precio, actualizar o crear en todos los faros
   async syncPrecio(fecha, productoId, precio) {
     const numPrecio = parseFloat(precio) || 0;
 
-    // Update all existing records for this date+product
-    const { error } = await supabase
-      .from('registros')
-      .update({ precio_kg: numPrecio, updated_at: new Date().toISOString() })
-      .eq('fecha', fecha)
-      .eq('producto_id', productoId);
+    for (const faro of this.faros) {
+      const existing = this.registros.find(
+        r => r.fecha === fecha && r.faro_id === faro.id && r.producto_id === productoId
+      );
 
-    if (error) console.error('Error sincronizando precio:', error);
-
-    // Update local cache
-    this.registros.forEach(r => {
-      if (r.producto_id === productoId) {
-        r.precio_kg = numPrecio;
+      if (existing) {
+        const { error } = await supabase
+          .from('registros')
+          .update({ precio_kg: numPrecio, updated_at: new Date().toISOString() })
+          .eq('id', existing.id);
+        if (!error) {
+          existing.precio_kg = numPrecio;
+        }
+      } else {
+        const newRecord = {
+          fecha,
+          faro_id: faro.id,
+          producto_id: productoId,
+          pedido_kg: 0,
+          despacho_kg: 0,
+          peso_real_kg: 0,
+          precio_kg: numPrecio
+        };
+        const { data, error } = await supabase
+          .from('registros')
+          .insert(newRecord)
+          .select()
+          .single();
+        if (!error && data) {
+          this.registros.push(data);
+        }
       }
-    });
-
-    return !error;
+    }
+    return true;
   },
 
   // --- CÁLCULOS ---
   getCalculoForFaro(faroId) {
     const items = this.registros
-      .filter(r => r.faro_id === faroId && r.despacho_kg > 0)
+      .filter(r => r.faro_id === faroId && (parseFloat(r.despacho_kg) > 0 || parseFloat(r.peso_real_kg) > 0))
       .map(r => {
         const producto = this.productos.find(p => p.id === r.producto_id);
         const precioRegistrado = parseFloat(r.precio_kg) || 0;
@@ -167,12 +185,26 @@ export const store = {
         const precioUsado = sinPrecio ? precioPromedio : precioRegistrado;
         const usaPromedio = sinPrecio && precioPromedio > 0;
 
+        const pesoReal = parseFloat(r.peso_real_kg) || 0;
+        const despachoVal = parseFloat(r.despacho_kg) || 0;
+        const pedidoVal = parseFloat(r.pedido_kg) || 0;
+
+        // Regla: si se tiene peso real, se usa peso real; si no, se usa el despacho.
+        const tienePesoReal = pesoReal > 0;
+        const qtyUsada = tienePesoReal ? pesoReal : despachoVal;
+        const subtotal = qtyUsada * precioUsado;
+
         return {
+          id: r.id,
+          producto_id: r.producto_id,
           nombre: producto ? producto.nombre : 'Desconocido',
-          despacho_kg: parseFloat(r.despacho_kg) || 0,
+          pedido_kg: pedidoVal,
+          despacho_kg: despachoVal,
+          peso_real_kg: pesoReal,
+          tienePesoReal: tienePesoReal,
           precio_kg: precioUsado,
           precio_original: precioRegistrado,
-          subtotal: (parseFloat(r.despacho_kg) || 0) * precioUsado,
+          subtotal: subtotal,
           sinPrecio: sinPrecio && !usaPromedio,
           usaPromedio: usaPromedio,
           precioPromedio: precioPromedio
@@ -203,13 +235,32 @@ export const store = {
   estados: [],
 
   async loadEstados(fecha) {
-    const { data, error } = await supabase
-      .from('estado_diario')
-      .select('*')
-      .eq('fecha', fecha);
-    if (error) { console.error('Error cargando estados:', error); return []; }
-    this.estados = data || [];
-    return this.estados;
+    try {
+      const { data, error } = await supabase
+        .from('estado_diario')
+        .select('*')
+        .eq('fecha', fecha);
+        
+      if (error) { 
+        console.warn('Error cargando estados de Supabase, usando respaldo local:', error); 
+        // Cargar desde localStorage como respaldo
+        const backups = JSON.parse(localStorage.getItem('backup_estados') || '{}');
+        this.estados = backups[fecha] || [];
+        return this.estados;
+      }
+      
+      this.estados = data || [];
+      // Guardar caché en localStorage
+      const backups = JSON.parse(localStorage.getItem('backup_estados') || '{}');
+      backups[fecha] = this.estados;
+      localStorage.setItem('backup_estados', JSON.stringify(backups));
+      return this.estados;
+    } catch (e) {
+      console.warn('Excepción cargando estados, usando respaldo local:', e);
+      const backups = JSON.parse(localStorage.getItem('backup_estados') || '{}');
+      this.estados = backups[fecha] || [];
+      return this.estados;
+    }
   },
 
   getEstado(faroId) {
@@ -226,25 +277,65 @@ export const store = {
       pagado,
       monto_pagado: parseFloat(montoPagado) || 0,
       nota_pago: notaPago,
-      fecha_pago: pagado ? new Date().toISOString() : null
+      fecha_pago: pagado ? (existing && existing.fecha_pago ? existing.fecha_pago : new Date().toISOString()) : null
     };
 
-    if (existing) {
-      const { error } = await supabase
-        .from('estado_diario')
-        .update(updates)
-        .eq('id', existing.id);
-      if (error) { console.error('Error actualizando pago:', error); return false; }
-      Object.assign(existing, updates);
-    } else {
-      const { data, error } = await supabase
-        .from('estado_diario')
-        .insert({ fecha, faro_id: faroId, ...updates })
-        .select()
-        .single();
-      if (error) { console.error('Error creando estado:', error); return false; }
-      this.estados.push(data);
+    let success = false;
+    
+    try {
+      if (existing && existing.id && !existing.id.toString().startsWith('local_')) {
+        const { error } = await supabase
+          .from('estado_diario')
+          .update(updates)
+          .eq('id', existing.id);
+        if (!error) {
+          Object.assign(existing, updates);
+          success = true;
+        } else {
+          console.error('Error actualizando pago en Supabase:', error);
+        }
+      } else {
+        // Intentar insertar
+        const { data, error } = await supabase
+          .from('estado_diario')
+          .insert({ fecha, faro_id: faroId, ...updates })
+          .select()
+          .single();
+        if (!error && data) {
+          if (existing) {
+            Object.assign(existing, data);
+          } else {
+            this.estados.push(data);
+          }
+          success = true;
+        } else {
+          console.error('Error creando pago en Supabase:', error);
+        }
+      }
+    } catch (e) {
+      console.error('Excepción guardando pago en Supabase:', e);
     }
+
+    // Si falló Supabase (por ejemplo, porque la tabla no existe aún), guardamos localmente en localStorage
+    if (!success) {
+      console.warn('Guardando cobro localmente en localStorage (Respaldado)');
+      if (existing) {
+        Object.assign(existing, updates);
+      } else {
+        const newEstado = {
+          id: 'local_' + Math.random().toString(36).substr(2, 9),
+          fecha,
+          faro_id: faroId,
+          ...updates
+        };
+        this.estados.push(newEstado);
+      }
+    }
+
+    // Actualizar localStorage
+    const backups = JSON.parse(localStorage.getItem('backup_estados') || '{}');
+    backups[fecha] = this.estados;
+    localStorage.setItem('backup_estados', JSON.stringify(backups));
     return true;
   },
 
@@ -256,22 +347,65 @@ export const store = {
       fecha_envio_factura: enviado ? new Date().toISOString() : null
     };
 
-    if (existing) {
-      const { error } = await supabase
-        .from('estado_diario')
-        .update(updates)
-        .eq('id', existing.id);
-      if (error) { console.error('Error actualizando envío:', error); return false; }
-      Object.assign(existing, updates);
-    } else {
-      const { data, error } = await supabase
-        .from('estado_diario')
-        .insert({ fecha, faro_id: faroId, ...updates })
-        .select()
-        .single();
-      if (error) { console.error('Error creando estado:', error); return false; }
-      this.estados.push(data);
+    let success = false;
+
+    try {
+      if (existing && existing.id && !existing.id.toString().startsWith('local_')) {
+        const { error } = await supabase
+          .from('estado_diario')
+          .update(updates)
+          .eq('id', existing.id);
+        if (!error) {
+          Object.assign(existing, updates);
+          success = true;
+        } else {
+          console.error('Error actualizando envío en Supabase:', error);
+        }
+      } else {
+        // Intentar insertar
+        const { data, error } = await supabase
+          .from('estado_diario')
+          .insert({ fecha, faro_id: faroId, ...updates })
+          .select()
+          .single();
+        if (!error && data) {
+          if (existing) {
+            Object.assign(existing, data);
+          } else {
+            this.estados.push(data);
+          }
+          success = true;
+        } else {
+          console.error('Error creando envío en Supabase:', error);
+        }
+      }
+    } catch (e) {
+      console.error('Excepción guardando envío en Supabase:', e);
     }
+
+    // Si falló Supabase, guardamos localmente en localStorage
+    if (!success) {
+      console.warn('Guardando envío de factura localmente en localStorage (Respaldado)');
+      if (existing) {
+        Object.assign(existing, updates);
+      } else {
+        const newEstado = {
+          id: 'local_' + Math.random().toString(36).substr(2, 9),
+          fecha,
+          faro_id: faroId,
+          pagado: false,
+          monto_pagado: 0,
+          nota_pago: '',
+          ...updates
+        };
+        this.estados.push(newEstado);
+      }
+    }
+
+    // Actualizar localStorage
+    const backups = JSON.parse(localStorage.getItem('backup_estados') || '{}');
+    backups[fecha] = this.estados;
+    localStorage.setItem('backup_estados', JSON.stringify(backups));
     return true;
   },
 
@@ -282,8 +416,40 @@ export const store = {
       .select('fecha')
       .order('fecha', { ascending: false });
     if (error) { console.error('Error cargando fechas:', error); return []; }
-    // Get unique dates
     const fechas = [...new Set((data || []).map(r => r.fecha))];
     return fechas;
+  },
+
+  // Obtener fechas sin registros para "Ponerse al día" (desde el 1 de Abril)
+  async getFechasSinRegistros() {
+    try {
+      const { data, error } = await supabase
+        .from('registros')
+        .select('fecha')
+        .gte('fecha', '2026-04-01');
+      if (error) { console.error('Error cargando fechas con registros:', error); return []; }
+
+      const fechasConData = new Set((data || []).map(r => r.fecha));
+
+      const start = new Date('2026-04-01T12:00:00');
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+
+      const fechasFaltantes = [];
+      let current = new Date(start);
+
+      while (current <= today) {
+        const dateStr = current.toISOString().split('T')[0];
+        if (!fechasConData.has(dateStr)) {
+          fechasFaltantes.push(dateStr);
+        }
+        current.setDate(current.getDate() + 1);
+      }
+
+      return fechasFaltantes.reverse();
+    } catch (e) {
+      console.error('Error en getFechasSinRegistros:', e);
+      return [];
+    }
   }
 };

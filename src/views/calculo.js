@@ -1,5 +1,5 @@
 import { store } from '../store.js';
-import { showToast } from '../main.js';
+import { showToast, showSaveIndicator } from '../main.js';
 
 // =============================================
 // CALCULO VIEW - Vista de factura/cálculo
@@ -92,24 +92,144 @@ export function renderCalculo(container) {
     renderCalculo(container);
   });
 
-  // --- Event: Update monto pagado ---
-  let montoTimer;
-  container.addEventListener('input', (e) => {
-    const input = e.target.closest('.monto-pago');
+  // --- Función auxiliar para agregar una nota al historial ---
+  const addNota = async (faroId) => {
+    const input = container.querySelector(`.nota-pago[data-faro-id="${faroId}"]`);
     if (!input) return;
-    clearTimeout(montoTimer);
-    montoTimer = setTimeout(async () => {
-      const faroId = input.dataset.faroId;
+    const newNota = input.value.trim();
+    if (newNota === '') return;
+
+    const estado = store.getEstado(faroId);
+    const currentNotes = estado.nota_pago ? estado.nota_pago.split('\n').filter(n => n.trim() !== '') : [];
+    currentNotes.push(newNota);
+    const combinedNota = currentNotes.join('\n');
+
+    const montoInput = container.querySelector(`.monto-pago[data-faro-id="${faroId}"]`);
+    const monto = montoInput ? parseFloat(montoInput.value) || 0 : 0;
+
+    await store.togglePagado(store.currentDate, faroId, true, monto, combinedNota);
+    input.value = ''; // Limpiar la caja de texto para otra nota
+    showSaveIndicator();
+    
+    // Volver a renderizar para mostrar la nueva nota en el historial
+    renderCalculo(container);
+
+    // Mantener foco en el input para comodidad del usuario
+    setTimeout(() => {
+      const newInput = container.querySelector(`.nota-pago[data-faro-id="${faroId}"]`);
+      if (newInput) newInput.focus();
+    }, 50);
+  };
+
+  // --- Event: Enter key on nota input ---
+  container.addEventListener('keydown', async (e) => {
+    const input = e.target.closest('.nota-pago');
+    if (!input || e.key !== 'Enter') return;
+    e.preventDefault();
+    const faroId = input.dataset.faroId;
+    await addNota(faroId);
+  });
+
+  // --- Event: Click on ➕ button ---
+  container.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.add-nota-btn');
+    if (!btn) return;
+    const faroId = btn.dataset.faroId;
+    await addNota(faroId);
+  });
+
+  // --- Event: Delete nota ---
+  container.addEventListener('click', async (e) => {
+    const deleteBtn = e.target.closest('.delete-nota-btn');
+    if (!deleteBtn) return;
+    
+    const faroId = deleteBtn.dataset.faroId;
+    const indexToDelete = parseInt(deleteBtn.dataset.index);
+    
+    const estado = store.getEstado(faroId);
+    const currentNotes = estado.nota_pago ? estado.nota_pago.split('\n').filter(n => n.trim() !== '') : [];
+    
+    if (indexToDelete >= 0 && indexToDelete < currentNotes.length) {
+      currentNotes.splice(indexToDelete, 1);
+      const combinedNota = currentNotes.join('\n');
+      
+      const montoInput = container.querySelector(`.monto-pago[data-faro-id="${faroId}"]`);
+      const monto = montoInput ? parseFloat(montoInput.value) || 0 : 0;
+      
+      await store.togglePagado(store.currentDate, faroId, estado.pagado, monto, combinedNota);
+      showSaveIndicator();
+      renderCalculo(container);
+    }
+  });
+
+  // --- Event: Activar pago automáticamente al hacer clic/enfocar en los inputs ---
+  container.addEventListener('focusin', async (e) => {
+    const input = e.target.closest('.monto-pago, .nota-pago');
+    if (!input) return;
+    const faroId = input.dataset.faroId;
+    const estado = store.getEstado(faroId);
+    
+    // Si no está registrado como pagado, activarlo automáticamente
+    if (!estado.pagado) {
+      const currentMontoInput = container.querySelector(`.monto-pago[data-faro-id="${faroId}"]`);
+      const currentNotaInput = container.querySelector(`.nota-pago[data-faro-id="${faroId}"]`);
+      const monto = currentMontoInput ? parseFloat(currentMontoInput.value) || 0 : 0;
+      const nota = currentNotaInput ? currentNotaInput.value : '';
+      
+      await store.togglePagado(store.currentDate, faroId, true, monto, estado.nota_pago);
+      
+      // Actualizar visualmente la palanca (toggle) a activo
+      const togglePago = container.querySelector(`.toggle-pago[data-faro-id="${faroId}"]`);
+      if (togglePago) {
+        togglePago.classList.add('active');
+        const detailEl = togglePago.closest('.estado-row').querySelector('.estado-detail');
+        if (detailEl) {
+          const updatedEstado = store.getEstado(faroId);
+          detailEl.textContent = updatedEstado.fecha_pago ? 'Registrado: ' + formatShortDate(updatedEstado.fecha_pago) : 'Registrado: Ahora';
+        }
+      }
+    }
+  });
+
+  // --- Event: Update monto pagado en tiempo real ---
+  let saveTimer;
+  container.addEventListener('input', (e) => {
+    const montoInput = e.target.closest('.monto-pago');
+    if (!montoInput) return;
+
+    const faroId = montoInput.dataset.faroId;
+
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      const currentMontoInput = container.querySelector(`.monto-pago[data-faro-id="${faroId}"]`);
+      const monto = currentMontoInput ? parseFloat(currentMontoInput.value) || 0 : 0;
+      
       const estado = store.getEstado(faroId);
-      await store.togglePagado(store.currentDate, faroId, estado.pagado, input.value, estado.nota_pago || '');
-      // Update diff display
+      
+      // Al escribir monto, se asume que se está especificando el pago, por lo tanto pagado = true
+      const pagado = true;
+      
+      await store.togglePagado(store.currentDate, faroId, pagado, monto, estado.nota_pago);
+      showSaveIndicator();
+
+      // Asegurar que el switch se mantenga o pase a activo visualmente
+      const togglePago = container.querySelector(`.toggle-pago[data-faro-id="${faroId}"]`);
+      if (togglePago) {
+        togglePago.classList.add('active');
+        const detailEl = togglePago.closest('.estado-row').querySelector('.estado-detail');
+        if (detailEl) {
+          const updatedEstado = store.getEstado(faroId);
+          detailEl.textContent = updatedEstado.fecha_pago ? 'Registrado: ' + formatShortDate(updatedEstado.fecha_pago) : 'Registrado: Ahora';
+        }
+      }
+
+      // Actualizar visualmente la diferencia del monto
       const faroIndex = store.faros.findIndex(f => f.id === faroId);
       if (faroIndex >= 0) {
         const calculo = store.getCalculoForFaro(faroId);
-        const montoPagado = parseFloat(input.value) || 0;
         const diffEl = container.querySelector(`.monto-diff-display[data-faro-id="${faroId}"]`);
-        if (diffEl && montoPagado > 0) {
-          const diff = montoPagado - calculo.total;
+        if (diffEl && monto > 0) {
+          const diff = monto - calculo.total;
           if (Math.abs(diff) < 0.01) {
             diffEl.className = 'monto-diff match monto-diff-display';
             diffEl.setAttribute('data-faro-id', faroId);
@@ -120,9 +240,11 @@ export function renderCalculo(container) {
             diffEl.textContent = `⚠️ Diferencia: S/ ${diff.toFixed(2)} (${diff > 0 ? 'pagó de más' : 'pagó de menos'})`;
           }
           diffEl.style.display = 'block';
+        } else if (diffEl) {
+          diffEl.style.display = 'none';
         }
       }
-    }, 500);
+    }, 600);
   });
 }
 
@@ -143,6 +265,22 @@ function renderEstadoSection(faro, faroIndex, totalCalculado) {
     diffHtml = `<div class="monto-diff-display" data-faro-id="${faro.id}" style="display:none;"></div>`;
   }
 
+  // Separar las notas por saltos de línea para renderizar cada una por separado
+  const notesList = estado.nota_pago ? estado.nota_pago.split('\n').filter(n => n.trim() !== '') : [];
+  let notesHtml = '';
+  if (notesList.length > 0) {
+    notesHtml = `
+      <div class="notas-lista-container" data-faro-id="${faro.id}" style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
+        ${notesList.map((n, index) => `
+          <div class="nota-item" data-index="${index}" style="display: flex; align-items: center; justify-content: space-between; font-size: 0.78rem; padding: 6px 10px; background: rgba(16, 185, 129, 0.06); border-radius: var(--radius-xs); border: 1px solid rgba(16, 185, 129, 0.15); transition: var(--transition);">
+            <span style="color: var(--text-primary); word-break: break-all; flex: 1; text-align: left;">📌 ${n}</span>
+            <button class="delete-nota-btn" data-faro-id="${faro.id}" data-index="${index}" style="background: none; border: none; color: var(--danger); cursor: pointer; padding: 2px 6px; font-size: 0.85rem; font-weight: bold; transition: var(--transition); -webkit-tap-highlight-color: transparent;">✕</button>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
   return `
     <div class="estado-section">
       <!-- Pago -->
@@ -154,12 +292,24 @@ function renderEstadoSection(faro, faroIndex, totalCalculado) {
           </div>
           <button class="estado-toggle toggle-pago ${estado.pagado ? 'active' : ''}" data-faro-id="${faro.id}"></button>
         </div>
+        
         <input type="number" class="estado-monto-input monto-pago" data-faro-id="${faro.id}"
           placeholder="Monto de la transferencia (S/)" inputmode="decimal" step="0.01"
           value="${hasMonto ? montoPagado : ''}">
-        <input type="text" class="estado-nota-input nota-pago" data-faro-id="${faro.id}"
-          placeholder="Nota (ej: captura de yape, nro operación...)"
-          value="${estado.nota_pago || ''}">
+        
+        <div style="position: relative; display: flex; gap: 8px; margin-top: 6px; width: 100%;">
+          <input type="text" class="estado-nota-input nota-pago" data-faro-id="${faro.id}"
+            placeholder="Agregar nota (ej. Op. 4392 / Yape de S/ 180...)"
+            style="margin-top: 0; flex: 1; padding-right: 10px;">
+          <button class="btn btn-primary add-nota-btn" data-faro-id="${faro.id}" 
+                  style="width: auto; padding: 10px 14px; border-radius: var(--radius-xs); flex-shrink: 0; margin-top: 0; font-size: 0.8rem;">
+            ➕
+          </button>
+        </div>
+        
+        <!-- Lista de notas guardadas -->
+        ${notesHtml}
+
         ${diffHtml}
       </div>
 
@@ -208,15 +358,25 @@ function renderSingleFaro(faro, faroIndex) {
         <div class="calculo-date">${formatDateLong(store.currentDate)}</div>
       </div>
       <div class="calculo-body">
-        ${calculo.items.map(item => `
-          <div class="calculo-row ${item.sinPrecio ? 'warning' : ''} ${item.usaPromedio ? 'promedio' : ''}">
-            <span class="calculo-producto">${item.nombre}${item.usaPromedio ? ' <span style="font-size:0.65rem; color:#06b6d4;">~prom</span>' : ''}</span>
-            <span class="calculo-qty">${item.despacho_kg} kg</span>
-            <span class="calculo-x">×</span>
-            <span class="calculo-price">${item.sinPrecio ? '⚠️ S/?' : (item.usaPromedio ? '<span style="color:#06b6d4">~S/' + item.precio_kg.toFixed(2) + '</span>' : 'S/' + item.precio_kg.toFixed(2))}</span>
-            <span class="calculo-subtotal">${item.sinPrecio ? '---' : 'S/' + item.subtotal.toFixed(2)}</span>
-          </div>
-        `).join('')}
+        ${calculo.items.map(item => {
+          const qty = item.tienePesoReal ? item.peso_real_kg : item.despacho_kg;
+          const labelQty = item.tienePesoReal 
+            ? `${qty.toFixed(1)} kg <span style="font-size: 0.65rem; color: #60a5fa; font-weight: 600;">(Rest.)</span>`
+            : `${qty.toFixed(1)} kg <span style="font-size: 0.65rem; color: var(--text-muted); font-weight: 500;">(Entr.)</span>`;
+
+          return `
+            <div class="calculo-row ${item.sinPrecio ? 'warning' : ''} ${item.usaPromedio ? 'promedio' : ''}">
+              <span class="calculo-producto" style="display: flex; flex-direction: column;">
+                <span style="font-weight: 600;">${item.nombre}</span>
+                ${item.usaPromedio ? '<span style="font-size:0.65rem; color:#06b6d4;">~ usando promedio</span>' : ''}
+              </span>
+              <span class="calculo-qty">${labelQty}</span>
+              <span class="calculo-x">×</span>
+              <span class="calculo-price">${item.sinPrecio ? '⚠️ S/?' : (item.usaPromedio ? '<span style="color:#06b6d4">~S/' + item.precio_kg.toFixed(2) + '</span>' : 'S/' + item.precio_kg.toFixed(2))}</span>
+              <span class="calculo-subtotal">${item.sinPrecio ? '---' : 'S/' + item.subtotal.toFixed(2)}</span>
+            </div>
+          `;
+        }).join('')}
       </div>
       <div class="calculo-divider"></div>
       <div class="calculo-total-row">
@@ -294,7 +454,10 @@ function generateShareText(faroIndex) {
 
   calculo.items.forEach(item => {
     const nombre = item.nombre.padEnd(14);
-    const qty = `${item.despacho_kg} kg`.padStart(7);
+    const qtyVal = item.tienePesoReal ? item.peso_real_kg : item.despacho_kg;
+    const suffix = item.tienePesoReal ? ' (Rest)' : ' (Entr)';
+    const qty = `${qtyVal.toFixed(1)} kg${suffix}`.padStart(13);
+    
     let price, sub;
     if (item.sinPrecio) {
       price = '  S/???  ';
@@ -353,3 +516,4 @@ function formatDateLong(dateStr) {
     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
   return `${parseInt(d)} de ${months[parseInt(m) - 1]} ${y}`;
 }
+

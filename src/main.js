@@ -2,6 +2,7 @@ import './styles.css';
 import { store } from './store.js';
 import { renderHome } from './views/home.js';
 import { renderRegistro } from './views/registro.js';
+import { renderReparto } from './views/reparto.js';
 import { renderCalculo } from './views/calculo.js';
 import { renderConfig } from './views/config.js';
 
@@ -12,6 +13,7 @@ import { renderConfig } from './views/config.js';
 const views = {
   home: renderHome,
   registro: renderRegistro,
+  reparto: renderReparto,
   calculo: renderCalculo,
   config: renderConfig
 };
@@ -57,6 +59,7 @@ function navigateTo(view) {
   const titles = {
     home: 'Control de Pagos',
     registro: 'Registro del Día',
+    reparto: 'Guía de Reparto',
     calculo: 'Cálculo / Factura',
     config: 'Configuración'
   };
